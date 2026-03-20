@@ -1,5 +1,5 @@
 # Build stage
-FROM node:22-slim AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -9,14 +9,12 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 # Production stage
-FROM node:22-slim AS production
+FROM node:22-alpine AS production
 
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ffmpeg
 
-RUN groupadd -g 1001 appuser && \
-    useradd -u 1001 -g appuser -m -s /bin/false appuser
+RUN addgroup -g 1001 appuser && \
+    adduser -u 1001 -G appuser -s /bin/false -D appuser
 
 WORKDIR /app
 
@@ -26,7 +24,6 @@ COPY --from=builder --chown=appuser:appuser /app/package.json ./
 
 USER appuser
 
-# Cloud Run sets PORT; keep 8080 as default for local/docker.
 ENV PORT=8080
 
 EXPOSE 8080
