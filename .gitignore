@@ -1,0 +1,43 @@
+# --- Dependencies
+node_modules/
+# Dockerfile uses npm ci + package-lock.json; ignore other lockfiles if present
+pnpm-lock.yaml
+yarn.lock
+
+# --- Build output (rebuilt in CI / Docker)
+dist/
+
+# --- Secrets & local env (never commit)
+.env
+.env.*
+!.env.example
+
+# --- Logs & temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# --- OS
+.DS_Store
+Thumbs.db
+
+# --- IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Test / coverage
+coverage/
+.nyc_output/
+
+# --- Caches
+.cache/
+*.tsbuildinfo
+
+# --- Optional local artifacts
+*.pem
+.pnpm-store/

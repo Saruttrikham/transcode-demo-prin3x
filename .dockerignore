@@ -1,0 +1,35 @@
+# Cloud Run image is built only from: package.json, package-lock.json, tsconfig.json, src/
+# (see Dockerfile). Exclude everything else to keep the build context small and safe.
+
+# Reinstalled / rebuilt inside the image
+node_modules
+dist
+
+# Secrets & local env (never bake into image)
+.env
+.env.*
+
+# VCS
+.git
+.gitattributes
+
+# Local development only
+docker-compose.yml
+compose.env
+scripts
+
+# Docs (not COPY’d by Dockerfile)
+*.md
+
+# IDE / OS noise
+.DS_Store
+.idea
+.vscode
+*.log
+
+# Test / misc
+coverage
+.tmp
+temp
+pnpm-lock.yaml
+.yarn

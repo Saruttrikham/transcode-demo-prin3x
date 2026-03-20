@@ -1,0 +1,17 @@
+# Cloud Run–style: no .env inside the image; variables are injected at start.
+#
+# Quick start:
+#   npm run env:init     # once: .env from .env.example
+#   npm run docker:up    # build + run (loads .env then compose.env)
+#
+# compose.env sets MINIO_ENDPOINT=host.docker.internal so the container can reach MinIO on your Mac/PC.
+services:
+  transcoding:
+    build: .
+    ports:
+      - '8080:8080'
+    env_file:
+      - .env
+      - compose.env
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
