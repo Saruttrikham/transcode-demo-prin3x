@@ -1,10 +1,22 @@
 /**
  * Transcoding service (Cloud Run).
  * POST /transcode: optional X-Callback-Token header when TRANSCODE_INGRESS_TOKEN is set; returns 202; background job calls callback on completion/failure.
+ * POST /transcode-test: FFmpeg lavfi synthetic test (no object storage); optional callback; returns 200 with inline result.
  */
 import './env';
+import { timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { runTranscode, type TranscodeRequest } from './transcode';
+import {
+  isValidSubtitleFormatInput,
+  postJsonCallback,
+  runSyntheticFfmpegTest,
+  runTranscode,
+  SUBTITLE_LANGUAGES,
+  type SubtitleLanguage,
+  type SubtitleTrackInput,
+  type SyntheticFfmpegTestRequest,
+  type TranscodeRequest,
+} from './transcode';
 
 const PORT = parseInt(process.env.PORT ?? '8080', 10);
 const TERMINATION_GRACE_MS = parseInt(
@@ -64,17 +76,131 @@ function getHeader(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+function isSubtitleLanguage(s: string): s is SubtitleLanguage {
+  return (SUBTITLE_LANGUAGES as readonly string[]).includes(s);
+}
+
+function isValidSubtitleTrackEntry(x: unknown): x is SubtitleTrackInput {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  if (typeof o.objectKey !== 'string' || !String(o.objectKey).trim()) {
+    return false;
+  }
+  if (typeof o.language !== 'string' || !isSubtitleLanguage(o.language)) {
+    return false;
+  }
+  if (o.bucket !== undefined && typeof o.bucket !== 'string') return false;
+  if (!isValidSubtitleFormatInput(o.format)) return false;
+  return true;
+}
+
 function validateTranscodeRequest(body: unknown): body is TranscodeRequest {
   if (!body || typeof body !== 'object') return false;
   const b = body as Record<string, unknown>;
-  return (
+
+  const base =
     typeof b.jobId === 'string' &&
     typeof b.sourceMediaId === 'string' &&
-    typeof b.sourceObjectKey === 'string' &&
     typeof b.sourceBucket === 'string' &&
     typeof b.callbackUrl === 'string' &&
-    typeof b.callbackToken === 'string'
+    typeof b.callbackToken === 'string';
+
+  if (!base) return false;
+
+
+  if (b.sourceObjectKey !== undefined && typeof b.sourceObjectKey !== 'string') {
+    return false;
+  }
+
+  if (b.subtitleBucket !== undefined && typeof b.subtitleBucket !== 'string') {
+    return false;
+  }
+
+  if (b.subtitles !== undefined) {
+    if (!Array.isArray(b.subtitles)) return false;
+    if (!b.subtitles.every(isValidSubtitleTrackEntry)) return false;
+    const langs = b.subtitles.map(
+      (t: SubtitleTrackInput) => t.language,
+    );
+    if (new Set(langs).size !== langs.length) return false;
+  }
+
+  const hasUsableSource =
+    typeof b.sourceObjectKey === 'string' &&
+    String(b.sourceObjectKey).trim() !== '';
+
+  const hasSubtitleArray =
+    Array.isArray(b.subtitles) && b.subtitles.length > 0;
+
+  if (!hasUsableSource && !hasSubtitleArray) {
+    return false;
+  }
+
+  return true;
+}
+
+function validationErrorHint(): string {
+  return (
+    'Invalid request body: jobId, sourceMediaId, sourceBucket, callbackUrl, callbackToken required. ' +
+    'Provide sourceObjectKey (non-empty) for a full transcode, or omit it and send a non-empty subtitles array ' +
+    '(each entry: objectKey + language \"th\"|\"en\", optional bucket, optional format). ' +
+    'subtitleOnly is optional and ignored. Subtitle languages must be unique per job.'
   );
+}
+
+function syntheticTestErrorHint(): string {
+  return (
+    'Invalid request body for /transcode-test: jobId (non-empty string) required. ' +
+    'Optional: durationSec (1–120), width/height (1–4096), fps (1–60), audio (boolean). ' +
+    'Optional callback: send both callbackUrl and callbackToken, or omit both.'
+  );
+}
+
+function validateSyntheticTestBody(
+  body: unknown,
+): body is SyntheticFfmpegTestRequest {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as Record<string, unknown>;
+  if (typeof b.jobId !== 'string' || !b.jobId.trim()) return false;
+
+  if (
+    b.durationSec !== undefined &&
+    (typeof b.durationSec !== 'number' || !Number.isFinite(b.durationSec))
+  ) {
+    return false;
+  }
+  if (b.width !== undefined && (typeof b.width !== 'number' || !Number.isFinite(b.width))) {
+    return false;
+  }
+  if (b.height !== undefined && (typeof b.height !== 'number' || !Number.isFinite(b.height))) {
+    return false;
+  }
+  if (b.fps !== undefined && (typeof b.fps !== 'number' || !Number.isFinite(b.fps))) {
+    return false;
+  }
+  if (b.audio !== undefined && typeof b.audio !== 'boolean') return false;
+
+  const hasUrl =
+    b.callbackUrl !== undefined &&
+    b.callbackUrl !== null &&
+    String(b.callbackUrl).trim() !== '';
+  const hasToken =
+    b.callbackToken !== undefined &&
+    b.callbackToken !== null &&
+    String(b.callbackToken).trim() !== '';
+
+  if (hasUrl !== hasToken) return false;
+  if (hasUrl) {
+    if (typeof b.callbackUrl !== 'string' || !b.callbackUrl.trim()) return false;
+    if (typeof b.callbackToken !== 'string' || !b.callbackToken.trim()) return false;
+  }
+
+  return true;
 }
 
 function runJob(body: TranscodeRequest): Promise<void> {
@@ -110,7 +236,7 @@ async function handleRequest(
       }
       if (TRANSCODE_INGRESS_TOKEN) {
         const headerToken = getHeader(req, 'x-callback-token');
-        if (headerToken !== TRANSCODE_INGRESS_TOKEN) {
+        if (!headerToken || !safeEqual(headerToken, TRANSCODE_INGRESS_TOKEN)) {
           sendJson(res, 401, {
             error: 'Missing or invalid X-Callback-Token header',
           });
@@ -120,8 +246,7 @@ async function handleRequest(
       const body = await parseBody(req);
       if (!validateTranscodeRequest(body)) {
         sendJson(res, 400, {
-          error:
-            'Invalid request body: jobId, sourceMediaId, sourceObjectKey, sourceBucket, callbackUrl, callbackToken required',
+          error: validationErrorHint(),
         });
         return;
       }
@@ -141,6 +266,56 @@ async function handleRequest(
       });
     } catch (err) {
       console.error('[Transcode] Parse error:', err);
+      sendJson(res, 400, { error: 'Invalid JSON body' });
+    }
+    return;
+  }
+
+  if (
+    (req.url === '/transcode-test' || req.url?.startsWith('/transcode-test?')) &&
+    req.method === 'POST'
+  ) {
+    try {
+      if (draining) {
+        sendJson(res, 503, {
+          error: 'Service is draining; retry on another instance',
+        });
+        return;
+      }
+      if (TRANSCODE_INGRESS_TOKEN) {
+        const headerToken = getHeader(req, 'x-callback-token');
+        if (!headerToken || !safeEqual(headerToken, TRANSCODE_INGRESS_TOKEN)) {
+          sendJson(res, 401, {
+            error: 'Missing or invalid X-Callback-Token header',
+          });
+          return;
+        }
+      }
+      const body = await parseBody(req);
+      if (!validateSyntheticTestBody(body)) {
+        sendJson(res, 400, { error: syntheticTestErrorHint() });
+        return;
+      }
+      const result = await runSyntheticFfmpegTest(body);
+      if (body.callbackUrl && body.callbackToken) {
+        try {
+          await postJsonCallback(body.callbackUrl.trim(), body.callbackToken.trim(), {
+            kind: 'SYNTHETIC_FFMPEG_TEST',
+            ...result,
+          });
+        } catch (cbErr) {
+          console.error('[Transcode] /transcode-test callback error:', cbErr);
+          sendJson(res, 200, {
+            ...result,
+            callbackError:
+              cbErr instanceof Error ? cbErr.message : String(cbErr),
+          });
+          return;
+        }
+      }
+      sendJson(res, 200, result);
+    } catch (err) {
+      console.error('[Transcode] /transcode-test error:', err);
       sendJson(res, 400, { error: 'Invalid JSON body' });
     }
     return;

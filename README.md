@@ -59,7 +59,7 @@ npm run docker:run
 
 Optional header if `TRANSCODE_INGRESS_TOKEN` is set: `X-Callback-Token: <token>`.
 
-Body:
+Body (minimal — full transcode, no subtitles):
 
 ```json
 {
@@ -71,6 +71,46 @@ Body:
   "callbackToken": "secret-for-your-webhook"
 }
 ```
+
+Example with **Thai and/or English** subtitles (`subtitles` is optional; each track requires `language`: `"th"` or `"en"` and `objectKey`; languages must be unique within the array):
+
+```json
+{
+  "jobId": "uuid",
+  "sourceMediaId": "uuid",
+  "sourceObjectKey": "path/to/source.mp4",
+  "sourceBucket": "my-bucket",
+  "callbackUrl": "https://api.example.com/webhooks/transcode",
+  "callbackToken": "secret-for-your-webhook",
+  "subtitles": [
+    { "objectKey": "subs/en.vtt", "language": "en" },
+    { "objectKey": "subs/th.vtt", "language": "th" }
+  ]
+}
+```
+
+**Subtitle-only update** (no FFmpeg): omit `sourceObjectKey` or send an empty/whitespace-only value, and provide a non-empty `subtitles` array **or** legacy `subtitleObjectKey` + `subtitleLanguage`. The service checks that shared renditions already exist under `transcoded/{sourceMediaId}/video/*.mp4` and fails with a clear error if not.
+
+| Field | Description |
+|-------|-------------|
+| `sourceObjectKey` | Source video in `sourceBucket`. Required for a **full transcode** (non-empty string). Omit (or empty) only for **subtitle-only** jobs when subtitle input is present. |
+| `subtitles` | Optional array of `{ "objectKey", "language": "th"\|"en", "bucket"?, "format"? }`. Per-track `bucket` defaults to `subtitleBucket` if set, else `sourceBucket`. If `objectKey` has **no file extension**, output uses **`.vtt`** unless `format` is **`"srt"`** (then **`.srt`**). |
+| `subtitleObjectKey` | Legacy single subtitle key (use `subtitleBucket` or `sourceBucket`). |
+| `subtitleLanguage` | **Required** with `subtitleObjectKey` when using the legacy single-track shape (`th` or `en`). |
+| `subtitleFormat` | Optional **`"vtt"`** \| **`"srt"`** when legacy `subtitleObjectKey` has no extension (same rule as per-track `format`). |
+| `subtitleBucket` | Default bucket for subtitle object keys when a track omits `bucket`. |
+| `subtitleOnly` | **Ignored** if present; subtitle-only mode is **derived** from missing usable `sourceObjectKey` + subtitle fields. |
+
+### Output layout (same bucket as `sourceBucket`)
+
+- **Video renditions (shared):** `transcoded/{sourceMediaId}/video/1080p.mp4`, `720p.mp4`, `480p.mp4`
+- **Thumbnails:** `transcoded/{sourceMediaId}/thumbnails/thumb_0.jpeg`, …
+- **No subtitles:** manifest `transcoded/{sourceMediaId}/manifest.smil` (references `video/*.mp4`)
+- **With subtitle(s):** same root manifest path `transcoded/{sourceMediaId}/manifest.smil`, plus tracks under `transcoded/{sourceMediaId}/subtitles/{language}.<ext>`. The SMIL references `video/*.mp4` and `../subtitles/*` (one `..` so URLs resolve when the playback path looks like `…/manifest.smil/playlist.m3u8`, e.g. nginx-vod). Playback URL stays `…/{sourceMediaId}/manifest.smil/…` — no `variants/` folder.
+
+Object consoles usually sort names **lexicographically**, so you typically see: `manifest.smil`, then `subtitles/`, `thumbnails/`, `video/` — not “thumbnails before subtitles”. To force subtitles last in the list you’d need a naming convention such as `z_subtitles/` (not used by default here).
+
+On success, the callback’s `manifestObjectKey` is always `transcoded/{sourceMediaId}/manifest.smil` when a manifest is written (with or without subtitles).
 
 Response **202**: `{ "jobId": "...", "accepted": true }`. Work continues in the background.
 

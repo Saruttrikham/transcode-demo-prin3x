@@ -6,21 +6,24 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
-RUN npm run build && npm prune --omit=dev
+RUN npm run build
 
-# Production stage
-FROM node:22-alpine AS production
+# Production: Debian slim + apt ffmpeg (includes lavfi; Alpine apk ffmpeg often omits it).
+FROM node:22-bookworm-slim AS production
 
-RUN apk add --no-cache ffmpeg
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -g 1001 appuser && \
-    adduser -u 1001 -G appuser -s /bin/false -D appuser
+RUN groupadd --gid 1001 appuser \
+  && useradd --uid 1001 --gid appuser --shell /usr/sbin/nologin --no-create-home appuser
 
 WORKDIR /app
 
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 COPY --from=builder --chown=appuser:appuser /app/dist ./dist
-COPY --from=builder --chown=appuser:appuser /app/node_modules ./node_modules
-COPY --from=builder --chown=appuser:appuser /app/package.json ./
 
 USER appuser
 
